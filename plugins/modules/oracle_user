@@ -92,7 +92,7 @@ options:
 		default: present
 		choices: ['present','absent','locked','unlocked']
 notes:
-	- cx_Oracle needs to be installed
+	- cx_Oracle or oracledb needs to be installed
 requirements: [ "cx_Oracle" ]
 author: Mikael Sandström, oravirt@gmail.com, @oravirt
 '''
@@ -113,13 +113,27 @@ oracle_user: hostname=localhost service_name=orcl user=system password=manager s
 import hashlib
 from binascii import unhexlify
 
-try:
-	import cx_Oracle
-except ImportError:
-	cx_oracle_exists = False
-else:
-	cx_oracle_exists = True
+# original Code
+# try:
+# 	import cx_Oracle
+# except ImportError:
+# 	cx_oracle_exists = False
+# else:
+# 	cx_oracle_exists = True
 
+try:
+  import oracledb as connect_ora
+except ImportError:
+  oracledb_exists = False
+  try:
+    import cx_Oracle as connect_ora
+  except ImportError:
+    cx_oracle_exists = False
+  else:
+    cx_oracle_exists = True
+else:
+  oracledb_exists = True
+  cx_oracle_exists = False
 
 def clean_string(item):
 	item = item.replace("'","").replace(", ",",").lstrip(" ").rstrip(",").replace("[","").replace("]","")
@@ -138,7 +152,7 @@ def check_user_exists(msg, cursor, schema):
 	try:
 			cursor.execute(sql)
 			result = cursor.fetchone()[0]
-	except cx_Oracle.DatabaseError as exc:
+	except connect_ora.DatabaseError as exc:
 			error, = exc.args
 			msg = error.message+ 'sql: ' + sql
 			module.fail_json(msg=msg)
@@ -212,7 +226,7 @@ def get_user_password_hash(module, cursor, schema):
 	try:
 			cursor.execute(sql)
 			pwhashresult = cursor.fetchone()[0]
-	except cx_Oracle.DatabaseError as exc:
+	except connect_ora.DatabaseError as exc:
 			error, = exc.args
 			msg = error.message+ ': sql: ' + sql
 			module.fail_json(msg=msg)
@@ -331,7 +345,7 @@ def execute_sql(module, cursor, sql):
 
 	try:
 		cursor.execute(sql)
-	except cx_Oracle.DatabaseError as exc:
+	except connect_ora.DatabaseError as exc:
 		error, = exc.args
 		msg = 'Blergh, something went wrong while executing sql - %s sql: %s' % (error.message, sql)
 		module.fail_json(msg=msg, changed=False)
@@ -343,7 +357,7 @@ def execute_sql_get(module, cursor, sql):
 	try:
 			cursor.execute(sql)
 			result = cursor.fetchall()
-	except cx_Oracle.DatabaseError as exc:
+	except connect_ora.DatabaseError as exc:
 			error, = exc.args
 			msg = error.message+ ': sql: ' + sql
 			module.fail_json(msg=msg)
@@ -363,7 +377,7 @@ def drop_user(module, cursor, schema):
 
 	try:
 		cursor.execute(sql)
-	except cx_Oracle.DatabaseError as exc:
+	except connect_ora.DatabaseError as exc:
 		error, = exc.args
 		msg = 'Blergh, something went wrong while dropping the schema - %s sql: %s' % (error.message, sql)
 		module.fail_json(msg=msg)
@@ -421,8 +435,8 @@ def main():
 	container_data = module.params["container_data"]
 	grants = module.params["grants"]
 
-	if not cx_oracle_exists:
-		module.fail_json(msg="The cx_Oracle module is required. 'pip install cx_Oracle' should do the trick. If cx_Oracle is installed, make sure ORACLE_HOME & LD_LIBRARY_PATH is set")
+	if not oracledb_exists and not cx_oracle_exists:
+		module.fail_json(msg="The oracledb or cx_Oracle module is required. 'pip install oracledb' or 'pip install cx_Oracle' should do the trick. If oracledb/cx_Oracle is installed, make sure ORACLE_HOME & LD_LIBRARY_PATH is set")
 
 
 	if oracle_home is not None:
@@ -436,25 +450,31 @@ def main():
 		if (not user and not password ): # If neither user or password is supplied, the use of an oracle wallet is assumed
 			if mode == 'sysdba':
 				connect = wallet_connect
-				conn = cx_Oracle.connect(wallet_connect, mode=cx_Oracle.SYSDBA)
+				conn = connect_ora.connect(wallet_connect, mode=connect_ora.SYSDBA)
 			else:
 				connect = wallet_connect
-				conn = cx_Oracle.connect(wallet_connect)
+				conn = connect_ora.connect(wallet_connect)
 
 		elif (user and password ):
-			if mode == 'sysdba':
-				dsn = cx_Oracle.makedsn(host=hostname, port=port, service_name=service_name)
-				connect = dsn
-				conn = cx_Oracle.connect(user, password, dsn, mode=cx_Oracle.SYSDBA)
+			if oracledb_exists:
+				# Thick mode cause of network encryption
+				connect_ora.init_oracle_client()  
+				cp = connect_ora.ConnectParams(host=hostname, port=port, service_name=service_name)
+				dsn = cp.get_connect_string()
 			else:
-				dsn = cx_Oracle.makedsn(host=hostname, port=port, service_name=service_name)
+				dsn = connect_ora.makedsn(host=hostname, port=port, service_name=service_name)
 				connect = dsn
-				conn = cx_Oracle.connect(user, password, dsn)
-
+			if mode == 'sysdba':
+				if oracledb_exists:
+					conn = connect_ora.connect(user=user, password=password, dsn=dsn, mode=connect_ora.AUTH_MODE_SYSDBA)
+				else:
+					conn = connect_ora.connect(user=user, password=password, dsn=dsn, mode=connect_ora.SYSDBA)
+			else:
+				conn = connect_ora.connect(user=user, password=password, dsn=dsn)
 		elif (not(user) or not(password)):
-			module.fail_json(msg='Missing username or password for cx_Oracle')
+			module.fail_json(msg='Missing username or password for oracledb/cx_Oracle')
 
-	except cx_Oracle.DatabaseError as exc:
+	except connect_ora.DatabaseError as exc:
 		error, = exc.args
 		msg = 'Could not connect to database - %s, connect descriptor: %s' % (error.message, connect)
 		module.fail_json(msg=msg, changed=False)
